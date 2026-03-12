@@ -1,5 +1,6 @@
 import type { BlobRef } from "@/actions/index";
 import type { LocationData } from "./edit/LocationInput";
+import type { SerializedPost } from "@/lib/bsky";
 
 export type ActiveIcon = {
   label: string;
@@ -35,6 +36,7 @@ export interface ProfileViewProps {
   isOwnProfile?: boolean;
   activeIcons: ActiveIcon[];
   editData?: ProfileEditData;
+  latestPost?: SerializedPost | null;
 }
 
 export interface EditSaveData {

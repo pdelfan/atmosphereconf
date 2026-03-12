@@ -6,14 +6,16 @@ import { getTalksByHandle } from "@/lib/talks";
 import StarringCard from "@/components/home/StarringCard.astro";
 import type { LoadedProfile } from "@/lib/profile";
 import type { ProfileEditData } from "@/components/profile/ProfileView";
+import type { SerializedPost } from "@/lib/bsky";
 
 interface Props {
   profile: LoadedProfile;
   editData?: ProfileEditData;
   viewerDid?: string;
+  latestPost?: SerializedPost | null;
 }
 
-const { profile, editData, viewerDid } = Astro.props;
+const { profile, editData, viewerDid, latestPost } = Astro.props;
 
 const svgFiles = import.meta.glob<string>(
   "/src/components/profile/icons/*.svg",
@@ -48,6 +50,7 @@ const talks = await getTalksByHandle(profile.handle);
       isOwnProfile={!!editData}
       activeIcons={activeIcons}
       editData={editData}
+      latestPost={latestPost}
     />
     {
       talks.length > 0 && (

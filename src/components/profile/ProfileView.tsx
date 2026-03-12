@@ -3,6 +3,7 @@ import { actions } from "astro:actions";
 import type { BlobRef } from "@/actions/index";
 import { RenderedProfile } from "./view/RenderedProfile";
 import { EditingProfile } from "./edit/EditingProfile";
+import { PostCard } from "../home/feed/PostCard";
 import type { EditSaveData } from "./profile-types";
 
 // Re-export types for existing consumers
@@ -27,6 +28,7 @@ export function ProfileView({
   isOwnProfile = false,
   activeIcons,
   editData,
+  latestPost,
 }: ProfileViewProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -117,22 +119,32 @@ export function ProfileView({
   }
 
   return (
-    <RenderedProfile
-      did={did}
-      handle={handle}
-      displayName={displayName}
-      avatarUrl={avatarUrl}
-      description={description}
-      bio={bio}
-      homeTown={homeTown}
-      interests={interests}
-      pronouns={pronouns}
-      website={website}
-      germMessageMeUrl={germMessageMeUrl}
-      viewerDid={viewerDid}
-      isOwnProfile={isOwnProfile}
-      activeIcons={activeIcons}
-      onEdit={() => setIsEditing(true)}
-    />
+    <>
+      <RenderedProfile
+        did={did}
+        handle={handle}
+        displayName={displayName}
+        avatarUrl={avatarUrl}
+        description={description}
+        bio={bio}
+        homeTown={homeTown}
+        interests={interests}
+        pronouns={pronouns}
+        website={website}
+        germMessageMeUrl={germMessageMeUrl}
+        viewerDid={viewerDid}
+        isOwnProfile={isOwnProfile}
+        activeIcons={activeIcons}
+        onEdit={() => setIsEditing(true)}
+      />
+      {latestPost && (
+        <div className="mt-4">
+          <div className="mb-2 text-xs tracking-wide text-gray-500 uppercase">
+            Most Recent Post
+          </div>
+          <PostCard post={latestPost} />
+        </div>
+      )}
+    </>
   );
 }

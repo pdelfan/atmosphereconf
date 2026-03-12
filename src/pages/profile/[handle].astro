@@ -3,6 +3,7 @@ import Layout from "../../layouts/Layout.astro";
 import ProfilePage from "@/components/profile/ProfilePage.astro";
 import { loadProfile } from "@/lib/profile";
 import { getTalksByHandle } from "@/lib/talks";
+import { fetchLatestPost } from "@/lib/bsky";
 
 const { handle } = Astro.params;
 const profile = await loadProfile(handle!);
@@ -12,6 +13,8 @@ if (!profile) return Astro.redirect("/404");
 
 const isSpeaker = (await getTalksByHandle(profile.handle)).length > 0;
 if (!viewerDid && !isSpeaker) return Astro.redirect("/login");
+
+const latestPost = await fetchLatestPost(profile.handle);
 
 const isOwnProfile = viewerDid === profile.did;
 const editData = isOwnProfile
@@ -32,5 +35,5 @@ const editData = isOwnProfile
 ---
 
 <Layout title={`${profile.displayName} - Atmosphere Conference`}>
-  <ProfilePage {profile} {editData} {viewerDid} />
+  <ProfilePage {profile} {editData} {viewerDid} {latestPost} />
 </Layout>

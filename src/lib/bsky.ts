@@ -112,3 +112,23 @@ export async function fetchFeedPage(cursor?: string): Promise<FeedPage> {
     cursor: res.data.cursor,
   };
 }
+
+export async function fetchLatestPost(
+  handle: string,
+): Promise<SerializedPost | null> {
+  try {
+    const agent = new AtpAgent({ service: BSKY_PUBLIC_API });
+    const res = await agent.app.bsky.feed.getAuthorFeed({
+      actor: handle,
+      limit: 1,
+      filter: "posts_no_replies",
+    });
+
+    const item = res.data.feed[0];
+    if (!item) return null;
+
+    return serializePost(item.post);
+  } catch {
+    return null;
+  }
+}
