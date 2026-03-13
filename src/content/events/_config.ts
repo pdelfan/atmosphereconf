@@ -1,7 +1,7 @@
 import { defineCollection, z } from "astro:content";
 import { atprotoEventLoader } from "./atproto-loader";
 
-const ADMIN_DID = import.meta.env.ADMIN_DID;
+const ADMIN_DID = import.meta.env.ADMIN_DID || "did:plc:257wekqxg4hyapkq6k47igmp";
 
 const speakerSchema = z.object({
   name: z.string(),

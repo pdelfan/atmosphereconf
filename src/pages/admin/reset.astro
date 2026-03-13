@@ -3,7 +3,7 @@ import Layout from "../../layouts/Layout.astro";
 import Card from "@/components/ui/card.astro";
 import { getPdsAgent } from "@fujocoded/authproto/helpers";
 
-const ADMIN_DID = import.meta.env.ADMIN_DID;
+const ADMIN_DID = import.meta.env.ADMIN_DID || "did:plc:257wekqxg4hyapkq6k47igmp";
 const loggedInUser = Astro.locals.loggedInUser;
 
 if (!loggedInUser || loggedInUser.did !== ADMIN_DID) {

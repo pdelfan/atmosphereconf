@@ -6,7 +6,7 @@ import Papa from "papaparse";
 import slugify from "slugify";
 import { TID } from "@atproto/common-web";
 
-const ADMIN_DID = import.meta.env.ADMIN_DID;
+const ADMIN_DID = import.meta.env.ADMIN_DID || "did:plc:257wekqxg4hyapkq6k47igmp";
 const loggedInUser = Astro.locals.loggedInUser;
 
 console.log("did", ADMIN_DID);
