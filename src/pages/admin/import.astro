@@ -1,0 +1,313 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import Card from "@/components/ui/card.astro";
+import { getPdsAgent } from "@fujocoded/authproto/helpers";
+import Papa from "papaparse";
+import slugify from "slugify";
+import { TID } from "@atproto/common-web";
+
+const ADMIN_DID = import.meta.env.ADMIN_DID;
+const loggedInUser = Astro.locals.loggedInUser;
+
+console.log("did", ADMIN_DID);
+
+// Auth gate: must be logged in with the admin DID
+if (!loggedInUser || loggedInUser.did !== ADMIN_DID) {
+  return Astro.redirect("/");
+}
+
+type ImportResult = {
+  total: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: { id: string; error: string }[];
+};
+
+let result: ImportResult | null = null;
+
+if (Astro.request.method === "POST") {
+  const formData = await Astro.request.formData();
+  const file = formData.get("csv") as File | null;
+
+  if (file && file.size > 0) {
+    const text = await file.text();
+    const { data: records } = Papa.parse<Record<string, string>>(text, {
+      header: true,
+      skipEmptyLines: true,
+    });
+
+    const pdsAgent = await getPdsAgent({ loggedInUser });
+    if (!pdsAgent) {
+      return new Response("Failed to connect to PDS", { status: 500 });
+    }
+
+    // Fetch all existing atmosphere event records
+    const existing = new Map<string, Record<string, unknown>>();
+    let cursor: string | undefined;
+    do {
+      const { data } = await pdsAgent.com.atproto.repo.listRecords({
+        repo: loggedInUser.did,
+        collection: "org.atmosphereconf.event",
+        limit: 100,
+        cursor,
+      });
+      for (const rec of data.records) {
+        const rkey = rec.uri.split("/").pop()!;
+        existing.set(rkey, rec.value as Record<string, unknown>);
+      }
+      cursor = data.cursor;
+    } while (cursor);
+
+    console.log(`[import] loaded ${existing.size} existing atmosphere event records`);
+
+    // Fetch all existing calendar event records (keyed by URI for reverse lookup)
+    const existingCalendar = new Map<string, Record<string, unknown>>();
+    cursor = undefined;
+    do {
+      const { data } = await pdsAgent.com.atproto.repo.listRecords({
+        repo: loggedInUser.did,
+        collection: "community.lexicon.calendar.event",
+        limit: 100,
+        cursor,
+      });
+      for (const rec of data.records) {
+        existingCalendar.set(rec.uri, rec.value as Record<string, unknown>);
+      }
+      cursor = data.cursor;
+    } while (cursor);
+
+    console.log(`[import] loaded ${existingCalendar.size} existing calendar event records`);
+
+    const TYPE_MAP: Record<string, string> = {
+      "Discussion / Panel": "panel",
+      "Lightning Talk": "lightning-talk",
+      Presentation: "presentation",
+      Workshop: "workshop",
+    };
+
+    result = {
+      total: records.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      errors: [],
+    };
+
+    for (const row of records) {
+      const submissionId = row["Submission ID"]?.trim();
+      if (!submissionId) continue;
+
+      const speakers: { name: string; id?: string }[] = [];
+      for (const n of ["1st", "2nd", "3rd", "4th"]) {
+        const name = row[`${n} Speaker Name`]?.trim();
+        if (name) {
+          const id =
+            row[`${n} Speaker ID`]?.replace(/^@/, "").trim() || undefined;
+          speakers.push({ name, id });
+        }
+      }
+
+      const typeRaw = row["Type"]?.trim() ?? "";
+      const type = TYPE_MAP[typeRaw] ?? typeRaw.toLowerCase();
+      const title = row["Talk Title"]?.trim();
+      if (!title) continue;
+
+      const rkey = slugify(submissionId, { lower: true, strict: true });
+
+      const record: Record<string, unknown> = {
+        $type: "org.atmosphereconf.event",
+        title,
+        type,
+      };
+
+      if (speakers.length > 0) record.speakers = speakers;
+
+      const start = row["Start Time"]?.trim();
+      const end = row["End Time"]?.trim();
+      const description = row["Proposal Description"]?.trim();
+      const category = row["Category"]?.trim();
+
+      if (start) record.start = start;
+      if (end) record.end = end;
+      if (description) record.description = description;
+      if (category) record.category = category;
+
+      // Check if record already exists and compare fields (ignoring metadata)
+      const existingRecord = existing.get(rkey);
+      if (existingRecord) {
+        const IGNORED_KEYS = new Set(["$type", "createdAt", "calendarEvent"]);
+        const relevantKeys = new Set([
+          ...Object.keys(existingRecord),
+          ...Object.keys(record),
+        ]);
+        const diffs: string[] = [];
+        for (const key of relevantKeys) {
+          if (IGNORED_KEYS.has(key)) continue;
+          const sortedStringify = (v: unknown): string =>
+            JSON.stringify(v, (_, val) =>
+              val && typeof val === "object" && !Array.isArray(val)
+                ? Object.fromEntries(Object.entries(val).sort(([a], [b]) => a.localeCompare(b)))
+                : val
+            );
+          const existingVal = sortedStringify(existingRecord[key]);
+          const newVal = sortedStringify(record[key]);
+          if (existingVal !== newVal) {
+            diffs.push(`  ${key}: ${existingVal} → ${newVal}`);
+          }
+        }
+        const changed = diffs.length > 0;
+        if (changed) {
+          console.log(`[import] ${submissionId} changed:\n${diffs.join("\n")}`);
+        }
+        if (!changed) {
+          console.log(`[import] skipped ${submissionId} (unchanged)`);
+          result.skipped++;
+          continue;
+        }
+      }
+
+      // Preserve createdAt from existing record, or set new
+      const now = new Date().toISOString();
+      record.createdAt =
+        (existingRecord as any)?.createdAt ?? now;
+
+      // Build calendar event record
+      const calendarRecord: Record<string, unknown> = {
+        $type: "community.lexicon.calendar.event",
+        name: title,
+        createdAt: now,
+        mode: type === "workshop" ? "community.lexicon.calendar.event#inperson" : "community.lexicon.calendar.event#hybrid",
+        status: "community.lexicon.calendar.event#scheduled",
+      };
+      if (start) calendarRecord.startsAt = start;
+      if (end) calendarRecord.endsAt = end;
+      if (description) calendarRecord.description = description;
+
+      // Determine calendar event rkey: reuse existing or generate new TID
+      const existingCalendarUri = (existingRecord as any)?.calendarEvent;
+      let calendarRkey: string;
+      if (existingCalendarUri && typeof existingCalendarUri === "string") {
+        calendarRkey = existingCalendarUri.split("/").pop()!;
+        // Preserve original createdAt from existing calendar record
+        const existingCalRecord = existingCalendar.get(existingCalendarUri);
+        if (existingCalRecord?.createdAt) {
+          calendarRecord.createdAt = existingCalRecord.createdAt;
+        }
+      } else {
+        calendarRkey = TID.nextStr();
+      }
+
+      try {
+        // Create/update calendar event
+        const { data: calData } = await pdsAgent.com.atproto.repo.putRecord({
+          repo: loggedInUser.did,
+          collection: "community.lexicon.calendar.event",
+          rkey: calendarRkey,
+          record: calendarRecord,
+        });
+        console.log(`[import] ${existingCalendarUri ? "updated" : "created"} calendar event ${submissionId}: ${calData.uri}`);
+
+        // Link calendar event from atmosphere event
+        record.calendarEvent = calData.uri;
+
+        // Create/update atmosphere event
+        const { data } = await pdsAgent.com.atproto.repo.putRecord({
+          repo: loggedInUser.did,
+          collection: "org.atmosphereconf.event",
+          rkey,
+          record,
+        });
+        if (existingRecord) {
+          console.log(`[import] updated atmosphere event ${submissionId}: ${data.uri}`);
+          result.updated++;
+        } else {
+          console.log(`[import] created atmosphere event ${submissionId}: ${data.uri}`);
+          result.created++;
+        }
+      } catch (err: any) {
+        console.error(
+          `[import] failed record ${submissionId}:`,
+          err?.message ?? err,
+        );
+        result.errors.push({
+          id: submissionId,
+          error: err?.message ?? String(err),
+        });
+      }
+    }
+  }
+}
+---
+
+<Layout title="Import Events - Admin">
+  <div
+    class="mx-auto flex max-w-2xl flex-1 flex-col items-center justify-center gap-6 p-6"
+  >
+    <Card class="w-full">
+      <h1 class="mb-4 text-2xl font-bold">Import Events from CSV</h1>
+      <p class="mb-6 text-sm text-gray-600">
+        Upload a CSV file to create <code>org.atmosphereconf.event</code> records
+        on your PDS. Uses the same format as the talks CSV.
+      </p>
+
+      <form
+        method="POST"
+        enctype="multipart/form-data"
+        class="flex flex-col gap-4"
+      >
+        <label class="flex flex-col gap-1.5">
+          <span class="text-sm font-medium">CSV File</span>
+          <input
+            type="file"
+            name="csv"
+            accept=".csv"
+            required
+            class="rounded-md border px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-sm"
+          />
+        </label>
+        <button
+          type="submit"
+          class="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
+        >
+          Import
+        </button>
+      </form>
+    </Card>
+
+    {
+      result && (
+        <Card class="w-full">
+          <h2 class="mb-3 text-lg font-semibold">Import Results</h2>
+          <dl class="mb-4 grid grid-cols-2 gap-2 text-sm">
+            <dt class="text-gray-600">Total rows</dt>
+            <dd class="font-mono">{result.total}</dd>
+            <dt class="text-gray-600">Created</dt>
+            <dd class="font-mono text-green-700">{result.created}</dd>
+            <dt class="text-gray-600">Updated</dt>
+            <dd class="font-mono text-blue-700">{result.updated}</dd>
+            <dt class="text-gray-600">Skipped (unchanged)</dt>
+            <dd class="font-mono text-gray-500">{result.skipped}</dd>
+            <dt class="text-gray-600">Errors</dt>
+            <dd class="font-mono text-red-700">{result.errors.length}</dd>
+          </dl>
+
+          {result.errors.length > 0 && (
+            <details class="text-sm">
+              <summary class="cursor-pointer font-medium text-red-700">
+                View errors
+              </summary>
+              <ul class="mt-2 space-y-1">
+                {result.errors.map((e) => (
+                  <li class="rounded bg-red-50 px-3 py-1.5 font-mono text-xs">
+                    <strong>{e.id}:</strong> {e.error}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </Card>
+      )
+    }
+  </div>
+</Layout>

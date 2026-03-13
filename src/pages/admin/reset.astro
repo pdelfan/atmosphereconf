@@ -1,0 +1,145 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import Card from "@/components/ui/card.astro";
+import { getPdsAgent } from "@fujocoded/authproto/helpers";
+
+const ADMIN_DID = import.meta.env.ADMIN_DID;
+const loggedInUser = Astro.locals.loggedInUser;
+
+if (!loggedInUser || loggedInUser.did !== ADMIN_DID) {
+  return Astro.redirect("/");
+}
+
+type ResetResult = {
+  atmosphereDeleted: number;
+  calendarDeleted: number;
+  errors: { uri: string; error: string }[];
+};
+
+let result: ResetResult | null = null;
+
+if (Astro.request.method === "POST") {
+  const pdsAgent = await getPdsAgent({ loggedInUser });
+  if (!pdsAgent) {
+    return new Response("Failed to connect to PDS", { status: 500 });
+  }
+
+  result = { atmosphereDeleted: 0, calendarDeleted: 0, errors: [] };
+
+  // Fetch all atmosphere event records
+  const atmosphereRecords: { uri: string; rkey: string; value: Record<string, unknown> }[] = [];
+  let cursor: string | undefined;
+  do {
+    const { data } = await pdsAgent.com.atproto.repo.listRecords({
+      repo: loggedInUser.did,
+      collection: "org.atmosphereconf.event",
+      limit: 100,
+      cursor,
+    });
+    for (const rec of data.records) {
+      atmosphereRecords.push({
+        uri: rec.uri,
+        rkey: rec.uri.split("/").pop()!,
+        value: rec.value as Record<string, unknown>,
+      });
+    }
+    cursor = data.cursor;
+  } while (cursor);
+
+  console.log(`[reset] found ${atmosphereRecords.length} atmosphere event records to delete`);
+
+  // Delete linked calendar events first
+  for (const rec of atmosphereRecords) {
+    const calUri = rec.value.calendarEvent;
+    if (typeof calUri === "string") {
+      const calRkey = calUri.split("/").pop()!;
+      try {
+        await pdsAgent.com.atproto.repo.deleteRecord({
+          repo: loggedInUser.did,
+          collection: "community.lexicon.calendar.event",
+          rkey: calRkey,
+        });
+        console.log(`[reset] deleted calendar event ${calRkey}`);
+        result.calendarDeleted++;
+      } catch (err: any) {
+        console.error(`[reset] failed to delete calendar event ${calRkey}:`, err?.message ?? err);
+        result.errors.push({ uri: calUri, error: err?.message ?? String(err) });
+      }
+    }
+  }
+
+  // Delete atmosphere event records
+  for (const rec of atmosphereRecords) {
+    try {
+      await pdsAgent.com.atproto.repo.deleteRecord({
+        repo: loggedInUser.did,
+        collection: "org.atmosphereconf.event",
+        rkey: rec.rkey,
+      });
+      console.log(`[reset] deleted atmosphere event ${rec.rkey}`);
+      result.atmosphereDeleted++;
+    } catch (err: any) {
+      console.error(`[reset] failed to delete atmosphere event ${rec.rkey}:`, err?.message ?? err);
+      result.errors.push({ uri: rec.uri, error: err?.message ?? String(err) });
+    }
+  }
+
+  console.log(`[reset] done: ${result.atmosphereDeleted} atmosphere + ${result.calendarDeleted} calendar events deleted, ${result.errors.length} errors`);
+}
+---
+
+<Layout title="Reset Events - Admin">
+  <div
+    class="mx-auto flex max-w-2xl flex-1 flex-col items-center justify-center gap-6 p-6"
+  >
+    <Card class="w-full">
+      <h1 class="mb-4 text-2xl font-bold text-red-700">Reset Events</h1>
+      <p class="mb-6 text-sm text-gray-600">
+        This will delete <strong>all</strong>
+        <code>org.atmosphereconf.event</code> records and their linked
+        <code>community.lexicon.calendar.event</code> records from your PDS.
+      </p>
+
+      <form method="POST">
+        <button
+          type="submit"
+          onclick="return confirm('Are you sure? This will delete all event records.')"
+          class="rounded-md bg-destructive px-4 py-2 text-sm font-medium !text-white hover:bg-destructive/90"
+        >
+          Delete All Events
+        </button>
+      </form>
+    </Card>
+
+    {
+      result && (
+        <Card class="w-full">
+          <h2 class="mb-3 text-lg font-semibold">Reset Results</h2>
+          <dl class="mb-4 grid grid-cols-2 gap-2 text-sm">
+            <dt class="text-gray-600">Atmosphere events deleted</dt>
+            <dd class="font-mono">{result.atmosphereDeleted}</dd>
+            <dt class="text-gray-600">Calendar events deleted</dt>
+            <dd class="font-mono">{result.calendarDeleted}</dd>
+            <dt class="text-gray-600">Errors</dt>
+            <dd class="font-mono text-red-700">{result.errors.length}</dd>
+          </dl>
+
+          {result.errors.length > 0 && (
+            <details class="text-sm">
+              <summary class="cursor-pointer font-medium text-red-700">
+                View errors
+              </summary>
+              <ul class="mt-2 space-y-1">
+                {result.errors.map((e) => (
+                  <li class="rounded bg-red-50 px-3 py-1.5 font-mono text-xs">
+                    <strong>{e.uri}:</strong> {e.error}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </Card>
+      )
+    }
+  </div>
+</Layout>
