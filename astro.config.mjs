@@ -29,9 +29,6 @@ export default defineConfig({
         additionalScopes: [
           "repo:org.atmosphereconf.profile?action=create",
           "repo:org.atmosphereconf.profile?action=update",
-          "repo:org.atmosphereconf.event?action=create",
-          "repo:org.atmosphereconf.event?action=update",
-          "repo:org.atmosphereconf.event?action=delete",
           "repo:community.lexicon.calendar.event?action=create",
           "repo:community.lexicon.calendar.event?action=update",
           "repo:community.lexicon.calendar.event?action=delete",

@@ -19,7 +19,6 @@ const eventSchema = z.object({
   description: z.string().optional(),
   link_url: z.string().optional(),
   link_text: z.string().optional(),
-  calendarEvent: z.string().optional(),
 });
 
 export const eventCollections = {

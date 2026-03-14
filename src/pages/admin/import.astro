@@ -3,15 +3,16 @@ import Layout from "../../layouts/Layout.astro";
 import Card from "@/components/ui/card.astro";
 import { getPdsAgent } from "@fujocoded/authproto/helpers";
 import Papa from "papaparse";
-import slugify from "slugify";
 import { TID } from "@atproto/common-web";
+import {
+  csvRowToEventData,
+  eventDataToCalendarRecord,
+} from "@/lib/calendar-event";
 
-const ADMIN_DID = import.meta.env.ADMIN_DID || "did:plc:257wekqxg4hyapkq6k47igmp";
+const ADMIN_DID =
+  import.meta.env.ADMIN_DID || "did:plc:257wekqxg4hyapkq6k47igmp";
 const loggedInUser = Astro.locals.loggedInUser;
 
-console.log("did", ADMIN_DID);
-
-// Auth gate: must be logged in with the admin DID
 if (!loggedInUser || loggedInUser.did !== ADMIN_DID) {
   return Astro.redirect("/");
 }
@@ -25,6 +26,15 @@ type ImportResult = {
 };
 
 let result: ImportResult | null = null;
+
+const sortedStringify = (v: unknown): string =>
+  JSON.stringify(v, (_, val) =>
+    val && typeof val === "object" && !Array.isArray(val)
+      ? Object.fromEntries(
+          Object.entries(val).sort(([a], [b]) => a.localeCompare(b)),
+        )
+      : val,
+  );
 
 if (Astro.request.method === "POST") {
   const formData = await Astro.request.formData();
@@ -42,28 +52,13 @@ if (Astro.request.method === "POST") {
       return new Response("Failed to connect to PDS", { status: 500 });
     }
 
-    // Fetch all existing atmosphere event records
-    const existing = new Map<string, Record<string, unknown>>();
+    // Fetch all existing calendar event records with isAtmosphereconf,
+    // keyed by rkey for lookup
+    const existing = new Map<
+      string,
+      { uri: string; value: Record<string, unknown> }
+    >();
     let cursor: string | undefined;
-    do {
-      const { data } = await pdsAgent.com.atproto.repo.listRecords({
-        repo: loggedInUser.did,
-        collection: "org.atmosphereconf.event",
-        limit: 100,
-        cursor,
-      });
-      for (const rec of data.records) {
-        const rkey = rec.uri.split("/").pop()!;
-        existing.set(rkey, rec.value as Record<string, unknown>);
-      }
-      cursor = data.cursor;
-    } while (cursor);
-
-    console.log(`[import] loaded ${existing.size} existing atmosphere event records`);
-
-    // Fetch all existing calendar event records (keyed by URI for reverse lookup)
-    const existingCalendar = new Map<string, Record<string, unknown>>();
-    cursor = undefined;
     do {
       const { data } = await pdsAgent.com.atproto.repo.listRecords({
         repo: loggedInUser.did,
@@ -72,19 +67,19 @@ if (Astro.request.method === "POST") {
         cursor,
       });
       for (const rec of data.records) {
-        existingCalendar.set(rec.uri, rec.value as Record<string, unknown>);
+        const value = rec.value as Record<string, unknown>;
+        const ad = value.additionalData as Record<string, unknown> | undefined;
+        if (ad?.isAtmosphereconf) {
+          const rkey = rec.uri.split("/").pop()!;
+          existing.set(rkey, { uri: rec.uri, value });
+        }
       }
       cursor = data.cursor;
     } while (cursor);
 
-    console.log(`[import] loaded ${existingCalendar.size} existing calendar event records`);
-
-    const TYPE_MAP: Record<string, string> = {
-      "Discussion / Panel": "panel",
-      "Lightning Talk": "lightning-talk",
-      Presentation: "presentation",
-      Workshop: "workshop",
-    };
+    console.log(
+      `[import] loaded ${existing.size} existing atmosphere calendar events`,
+    );
 
     result = {
       total: records.length,
@@ -98,45 +93,27 @@ if (Astro.request.method === "POST") {
       const submissionId = row["Submission ID"]?.trim();
       if (!submissionId) continue;
 
-      const speakers: { name: string; id?: string }[] = [];
-      for (const n of ["1st", "2nd", "3rd", "4th"]) {
-        const name = row[`${n} Speaker Name`]?.trim();
-        if (name) {
-          const id =
-            row[`${n} Speaker ID`]?.replace(/^@/, "").trim() || undefined;
-          speakers.push({ name, id });
+      const eventData = csvRowToEventData(row);
+      if (!eventData) continue;
+
+      const now = new Date().toISOString();
+      const record = eventDataToCalendarRecord(eventData, now, submissionId);
+
+      // Look for existing record with same submissionId
+      let existingRkey: string | undefined;
+      let existingRecord: Record<string, unknown> | undefined;
+      for (const [rkey, entry] of existing) {
+        const ad = entry.value.additionalData as Record<string, unknown>;
+        if (ad?.submissionId === submissionId) {
+          existingRkey = rkey;
+          existingRecord = entry.value;
+          break;
         }
       }
 
-      const typeRaw = row["Type"]?.trim() ?? "";
-      const type = TYPE_MAP[typeRaw] ?? typeRaw.toLowerCase();
-      const title = row["Talk Title"]?.trim();
-      if (!title) continue;
-
-      const rkey = slugify(submissionId, { lower: true, strict: true });
-
-      const record: Record<string, unknown> = {
-        $type: "org.atmosphereconf.event",
-        title,
-        type,
-      };
-
-      if (speakers.length > 0) record.speakers = speakers;
-
-      const start = row["Start Time"]?.trim();
-      const end = row["End Time"]?.trim();
-      const description = row["Proposal Description"]?.trim();
-      const category = row["Category"]?.trim();
-
-      if (start) record.start = start;
-      if (end) record.end = end;
-      if (description) record.description = description;
-      if (category) record.category = category;
-
-      // Check if record already exists and compare fields (ignoring metadata)
-      const existingRecord = existing.get(rkey);
       if (existingRecord) {
-        const IGNORED_KEYS = new Set(["$type", "createdAt", "calendarEvent"]);
+        // Compare fields (ignoring createdAt)
+        const IGNORED_KEYS = new Set(["$type", "createdAt"]);
         const relevantKeys = new Set([
           ...Object.keys(existingRecord),
           ...Object.keys(record),
@@ -144,85 +121,44 @@ if (Astro.request.method === "POST") {
         const diffs: string[] = [];
         for (const key of relevantKeys) {
           if (IGNORED_KEYS.has(key)) continue;
-          const sortedStringify = (v: unknown): string =>
-            JSON.stringify(v, (_, val) =>
-              val && typeof val === "object" && !Array.isArray(val)
-                ? Object.fromEntries(Object.entries(val).sort(([a], [b]) => a.localeCompare(b)))
-                : val
-            );
-          const existingVal = sortedStringify(existingRecord[key]);
-          const newVal = sortedStringify(record[key]);
+          const existingVal = sortedStringify(
+            (existingRecord as any)[key],
+          );
+          const newVal = sortedStringify((record as any)[key]);
           if (existingVal !== newVal) {
             diffs.push(`  ${key}: ${existingVal} → ${newVal}`);
           }
         }
-        const changed = diffs.length > 0;
-        if (changed) {
-          console.log(`[import] ${submissionId} changed:\n${diffs.join("\n")}`);
-        }
-        if (!changed) {
+        if (diffs.length === 0) {
           console.log(`[import] skipped ${submissionId} (unchanged)`);
           result.skipped++;
           continue;
         }
+        console.log(
+          `[import] ${submissionId} changed:\n${diffs.join("\n")}`,
+        );
+        // Preserve original createdAt
+        record.createdAt = (existingRecord.createdAt as string) ?? now;
       }
 
-      // Preserve createdAt from existing record, or set new
-      const now = new Date().toISOString();
-      record.createdAt =
-        (existingRecord as any)?.createdAt ?? now;
-
-      // Build calendar event record
-      const calendarRecord: Record<string, unknown> = {
-        $type: "community.lexicon.calendar.event",
-        name: title,
-        createdAt: now,
-        mode: type === "workshop" ? "community.lexicon.calendar.event#inperson" : "community.lexicon.calendar.event#hybrid",
-        status: "community.lexicon.calendar.event#scheduled",
-      };
-      if (start) calendarRecord.startsAt = start;
-      if (end) calendarRecord.endsAt = end;
-      if (description) calendarRecord.description = description;
-
-      // Determine calendar event rkey: reuse existing or generate new TID
-      const existingCalendarUri = (existingRecord as any)?.calendarEvent;
-      let calendarRkey: string;
-      if (existingCalendarUri && typeof existingCalendarUri === "string") {
-        calendarRkey = existingCalendarUri.split("/").pop()!;
-        // Preserve original createdAt from existing calendar record
-        const existingCalRecord = existingCalendar.get(existingCalendarUri);
-        if (existingCalRecord?.createdAt) {
-          calendarRecord.createdAt = existingCalRecord.createdAt;
-        }
-      } else {
-        calendarRkey = TID.nextStr();
-      }
+      const rkey = existingRkey ?? TID.nextStr();
 
       try {
-        // Create/update calendar event
-        const { data: calData } = await pdsAgent.com.atproto.repo.putRecord({
-          repo: loggedInUser.did,
-          collection: "community.lexicon.calendar.event",
-          rkey: calendarRkey,
-          record: calendarRecord,
-        });
-        console.log(`[import] ${existingCalendarUri ? "updated" : "created"} calendar event ${submissionId}: ${calData.uri}`);
-
-        // Link calendar event from atmosphere event
-        record.calendarEvent = calData.uri;
-
-        // Create/update atmosphere event
         const { data } = await pdsAgent.com.atproto.repo.putRecord({
           repo: loggedInUser.did,
-          collection: "org.atmosphereconf.event",
+          collection: "community.lexicon.calendar.event",
           rkey,
           record,
         });
         if (existingRecord) {
-          console.log(`[import] updated atmosphere event ${submissionId}: ${data.uri}`);
+          console.log(
+            `[import] updated calendar event ${submissionId}: ${data.uri}`,
+          );
           result.updated++;
         } else {
-          console.log(`[import] created atmosphere event ${submissionId}: ${data.uri}`);
+          console.log(
+            `[import] created calendar event ${submissionId}: ${data.uri}`,
+          );
           result.created++;
         }
       } catch (err: any) {
@@ -247,8 +183,9 @@ if (Astro.request.method === "POST") {
     <Card class="w-full">
       <h1 class="mb-4 text-2xl font-bold">Import Events from CSV</h1>
       <p class="mb-6 text-sm text-gray-600">
-        Upload a CSV file to create <code>org.atmosphereconf.event</code> records
-        on your PDS. Uses the same format as the talks CSV.
+        Upload a CSV file to create <code
+          >community.lexicon.calendar.event</code
+        > records on your PDS. Uses the same format as the talks CSV.
       </p>
 
       <form

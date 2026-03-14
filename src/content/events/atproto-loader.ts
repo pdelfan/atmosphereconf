@@ -1,5 +1,6 @@
 import type { Loader } from "astro/loaders";
 import { AtpBaseClient } from "@atproto/api";
+import { calendarRecordToEventData } from "@/lib/calendar-event";
 
 export function atprotoEventLoader(did: string): Loader {
   return {
@@ -27,24 +28,27 @@ export function atprotoEventLoader(did: string): Loader {
       do {
         const { data } = await agent.com.atproto.repo.listRecords({
           repo: did,
-          collection: "org.atmosphereconf.event",
+          collection: "community.lexicon.calendar.event",
           limit: 100,
           cursor,
         });
 
         for (const rec of data.records) {
-          const rkey = rec.uri.split("/").pop()!;
           const value = rec.value as Record<string, unknown>;
-          const { $type, createdAt, ...entry } = value;
-          const data = await parseData({ id: rkey, data: entry });
-          store.set({ id: rkey, data });
+          const ad = value.additionalData as Record<string, unknown> | undefined;
+          if (!ad?.isAtmosphereconf) continue;
+
+          const rkey = rec.uri.split("/").pop()!;
+          const eventData = calendarRecordToEventData(value);
+          const parsed = await parseData({ id: rkey, data: eventData });
+          store.set({ id: rkey, data: parsed });
           count++;
         }
 
         cursor = data.cursor;
       } while (cursor);
 
-      logger.info(`Loaded ${count} events from ${did}`);
+      logger.info(`Loaded ${count} atmosphere events from ${did}`);
     },
   };
 }
