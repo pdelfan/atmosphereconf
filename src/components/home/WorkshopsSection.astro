@@ -1,6 +1,7 @@
 ---
 import Card from "@/components/ui/card.astro";
 import DaySchedule from "@/components/ui/DaySchedule.astro";
+import DayScheduleTable from "@/components/ui/DayScheduleTable.astro";
 import { getCollection } from "astro:content";
 
 const schedule = await getCollection("schedule");
@@ -18,8 +19,8 @@ const rooms = [
 ];
 
 const days = [
-  { date: "2026-03-26", heading: "Thursday, March 26th: Workshops" },
-  { date: "2026-03-27", heading: "Friday, March 27th: Workshops & ATScience" },
+  { date: "2026-03-26", heading: "Thursday, March 26th" },
+  { date: "2026-03-27", heading: "Friday, March 27th" },
 ] as const;
 ---
 
@@ -33,7 +34,7 @@ const days = [
     </p>
 
     {
-      days.map(({ date, heading }) => {
+      days.map(({ date, heading }, i) => {
         const events = allWorkshops
           .filter((w) => w.data.start?.startsWith(date))
           .map((w) => ({ id: w.id, ...w.data }));
@@ -41,7 +42,12 @@ const days = [
         return (
           <div class="mt-8">
             <h3 class="mb-4 text-lg font-semibold text-foreground">{heading}</h3>
-            <DaySchedule events={events} rooms={rooms} />
+            <div class="schedule-grid-view">
+              <DaySchedule events={events} rooms={rooms} />
+            </div>
+            <div class="schedule-table-view">
+              <DayScheduleTable events={events} rooms={rooms} tableIndex={i} />
+            </div>
           </div>
         );
       })
